@@ -1,0 +1,7 @@
+redundans-star:
+  forum:
+    star: "Stjärnmärk"
+    starred: "Stjärnmärkt"
+  admin:
+    permissions:
+      star_posts_label: "Kan stjärnmarkera inlägg"

@@ -1,0 +1,7 @@
+redundans-star:
+  forum:
+    star: "Star"
+    starred: "Starred"
+  admin:
+    permissions:
+      star_posts_label: "Can star posts"
