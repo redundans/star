@@ -15,6 +15,9 @@ use Flarum\Extend;
 use Flarum\Api\Resource\PostResource;
 use Flarum\Api\Schema\Boolean;
 use Flarum\Post\Event\Saving;
+use Flarum\Post\Filter\PostSearcher;
+use Flarum\Search\Database\DatabaseSearchDriver;
+use redundans\Star\Filter\StarredFilter;
 
 return [
     // Frontend files.
@@ -47,6 +50,11 @@ return [
                     }),
             ];
         }),
+
+
+    // Registrera filtret med klassnamnet som en sträng för Flarum 2.0
+    (new Extend\SearchDriver(DatabaseSearchDriver::class))
+        ->addFilter(PostSearcher::class, StarredFilter::class),
 
     // Add listener.
     (new Extend\Event())
