@@ -18,9 +18,10 @@ use Flarum\Post\Event\Saving;
 use Flarum\Post\Filter\PostSearcher;
 use Flarum\Search\Database\DatabaseSearchDriver;
 use redundans\Star\Filter\StarredFilter;
+use redundans\Star\Listener\PostToBluesky;
+use redundans\Star\Listener\PostToMastodon;
 
 return [
-    // Frontend files.
     (new Extend\Frontend('forum'))
         ->js(__DIR__.'/js/dist/forum.js')
         ->css(__DIR__.'/less/forum.less'),
@@ -28,10 +29,8 @@ return [
     (new Extend\Frontend('admin'))
         ->js(__DIR__.'/js/dist/admin.js'),
 
-    // Load language.
     new Extend\Locales(__DIR__.'/resources/locale'),
 
-    // Register PostResource.
     (new Extend\ApiResource(PostResource::class))
         ->fields(function () {
             return [
@@ -42,21 +41,15 @@ return [
                     ->writable(),
                 Boolean::make('canStar')
                     ->get(function ($post, \Flarum\Api\Context $context) {
-                        // Hämta den inloggade användaren direkt från Flarums API Context
                         $actor = $context->getActor(); //
-
-                        // Returnerar true eller false baserat på inställningen i Adminpanelen
                         return $actor && $actor->hasPermission('redundans-star.star_posts');
                     }),
             ];
         }),
 
-
-    // Registrera filtret med klassnamnet som en sträng för Flarum 2.0
     (new Extend\SearchDriver(DatabaseSearchDriver::class))
         ->addFilter(PostSearcher::class, StarredFilter::class),
 
-    // Add listener.
     (new Extend\Event())
         ->listen(Saving::class, function (Saving $event) {
             $post = $event->post;
@@ -67,4 +60,10 @@ return [
                 $post->is_starred = (bool) $data['attributes']['isStarred'];
             }
         }),
+
+    (new Extend\Event)
+        ->listen(Saving::class, PostToBluesky::class),
+
+    (new Extend\Event)
+        ->listen(Saving::class, PostToMastodon::class),
 ];
