@@ -18,8 +18,7 @@ use Flarum\Post\Event\Saving;
 use Flarum\Post\Filter\PostSearcher;
 use Flarum\Search\Database\DatabaseSearchDriver;
 use redundans\Star\Filter\StarredFilter;
-use redundans\Star\Listener\PostToBluesky;
-use redundans\Star\Listener\PostToMastodon;
+use redundans\Star\Listener\PublishStarredPost;
 
 return [
     (new Extend\Frontend('forum'))
@@ -41,7 +40,7 @@ return [
                     ->writable(),
                 Boolean::make('canStar')
                     ->get(function ($post, \Flarum\Api\Context $context) {
-                        $actor = $context->getActor(); //
+                        $actor = $context->getActor();
                         return $actor && $actor->hasPermission('redundans-star.star_posts');
                     }),
             ];
@@ -59,11 +58,9 @@ return [
                 $event->actor->assertCan('redundans-star.star_posts');
                 $post->is_starred = (bool) $data['attributes']['isStarred'];
             }
+
+            if ($post->is_starred && !$post->is_synced_to_social) {
+                resolve(PublishStarredPost::class)->handle($event);
+            }
         }),
-
-    (new Extend\Event)
-        ->listen(Saving::class, PostToBluesky::class),
-
-    (new Extend\Event)
-        ->listen(Saving::class, PostToMastodon::class),
 ];
