@@ -15,7 +15,11 @@ use Flarum\Extend;
 use Flarum\Api\Resource\PostResource;
 use Flarum\Api\Schema\Boolean;
 use Flarum\Post\Event\Saving;
-use Flarum\Post\Filter\PostSearcher;
+use Flarum\Api\Schema\Attribute;
+use Flarum\Discussion\Discussion;
+use Flarum\Api\Context;
+use Illuminate\Database\ConnectionInterface;
+use Flarum\Api\Resource\DiscussionResource;
 use Flarum\Search\Database\DatabaseSearchDriver;
 use redundans\Star\Filter\StarredFilter;
 use redundans\Star\Listener\PublishStarredPost;
@@ -28,6 +32,26 @@ return [
     (new Extend\Frontend('admin'))
         ->js(__DIR__.'/js/dist/admin.js'),
 
+    (new Extend\ApiResource(DiscussionResource::class))
+    ->fields(fn () => [
+        Attribute::make('canStar')
+            ->get(function (Discussion $discussion, Context $context) {
+                $db = resolve(ConnectionInterface::class);
+                $hasRestrictedTag = $db->table('discussion_tag')
+                    ->join('tags', 'discussion_tag.tag_id', '=', 'tags.id')
+                    ->where('discussion_tag.discussion_id', $discussion->id)
+                    ->where('tags.is_restricted', true)
+                    ->exists();
+
+                if ($hasRestrictedTag) {
+                    return false;
+                }
+
+                $actor = $context->getActor();
+                return $actor ? $actor->can('redundans-star.star_posts', $discussion) : false;
+            })
+    ]),
+
     new Extend\Locales(__DIR__.'/resources/locale'),
 
     (new Extend\ApiResource(PostResource::class))
@@ -38,11 +62,6 @@ return [
                         return (bool) $post->is_starred;
                     })
                     ->writable(),
-                Boolean::make('canStar')
-                    ->get(function ($post, \Flarum\Api\Context $context) {
-                        $actor = $context->getActor();
-                        return $actor && $actor->hasPermission('redundans-star.star_posts');
-                    }),
             ];
         }),
 
@@ -53,6 +72,17 @@ return [
         ->listen(Saving::class, function (Saving $event) {
             $post = $event->post;
             $data = $event->data;
+
+            $discussion = $post->discussion;
+
+            if ($discussion) {
+                $tags = $discussion->tags()->get();
+                foreach ($tags as $tag) {
+                    if ((bool) $tag->is_restricted) {
+                        return;
+                    }
+                }
+            }
 
             if (isset($data['attributes']['isStarred'])) {
                 $event->actor->assertCan('redundans-star.star_posts');

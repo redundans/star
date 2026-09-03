@@ -12,11 +12,9 @@ app.initializers.add('redundans-star-forum', () => {
 
   extend(CommentPost.prototype, 'actionItems', function (this: CommentPost, items: ItemList<Mithril.Children>) {
     const post = this.attrs.post as Post;
+    const discussion = post.discussion(); // Hämta diskussionen som inlägget tillhör
+    const canStar = discussion ? (discussion.attribute<boolean>('canStar') || false) : false;
 
-    // Hämta det nya beräknade rättighetsattributet från vår backend
-    const canStar = post.attribute<boolean>('canStar') || false;
-
-    // Om användaren inte är inloggad eller saknar admin-rättigheten, rita inte ut knappen
     if (!app.session.user || !canStar) {
       return;
     }
