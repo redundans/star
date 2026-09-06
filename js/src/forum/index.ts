@@ -6,13 +6,11 @@ import ItemList from 'flarum/common/utils/ItemList';
 import type Mithril from 'mithril';
 import type Post from 'flarum/common/models/Post';
 
-// Flarum 2.0 förväntar sig en direkt export-funktion för forumets startpunkt
-
 app.initializers.add('redundans-star-forum', () => {
 
   extend(CommentPost.prototype, 'actionItems', function (this: CommentPost, items: ItemList<Mithril.Children>) {
     const post = this.attrs.post as Post;
-    const discussion = post.discussion(); // Hämta diskussionen som inlägget tillhör
+    const discussion = post.discussion();
     const canStar = discussion ? (discussion.attribute<boolean>('canStar') || false) : false;
 
     if (!app.session.user || !canStar) {

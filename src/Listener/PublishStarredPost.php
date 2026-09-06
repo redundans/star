@@ -56,6 +56,55 @@ class PublishStarredPost
         }
     }
 
+    public function fetchImageObject(Array $match): Object {
+        $imageUrl = !empty($match[2]) ? $match[2] : ($match[3] ?? null);
+        $imageObject = (Object) [
+            'fileName' => null,
+            'mimeType' => null,
+            'imageData' => null,
+            'altText' => null,
+        ];
+
+        $imageObject->altText = 'Bifogad bild';
+
+        if (str_contains($imageUrl, '/assets/')) {
+            $pathParts = explode('/assets/', $imageUrl);
+            $localPath = public_path('assets/' . $pathParts[1]);
+
+            if (file_exists($localPath)) {
+                $imageObject->imageData = file_get_contents($localPath);
+                $imageObject->mimeType = (new \finfo(FILEINFO_MIME_TYPE))->file($localPath);
+                $imageObject->fileName = basename($localPath);
+            }
+        } elseif (filter_var($imageUrl, FILTER_VALIDATE_URL)) {
+            $externalData = @file_get_contents(
+                $imageUrl,
+                false,
+                stream_context_create(
+                    [
+                        "http" => [
+                            "method" => "GET",
+                            "header" => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
+                        ]
+                    ]
+                )
+            );
+            if ($externalData !== false) {
+                $imageObject->fileName = basename(parse_url($imageUrl, PHP_URL_PATH)) ?: 'image.jpg';
+                $imageObject->imageData = $externalData;
+                $ext = pathinfo($imageUrl, PATHINFO_EXTENSION);
+                $imageObject->mimeType = match(strtolower($ext)) {
+                    'jpg', 'jpeg' => 'image/jpeg',
+                    'png' => 'image/png',
+                    'gif' => 'image/gif',
+                    'webp' => 'image/webp',
+                    default => 'image/jpeg',
+                };
+            }
+        }
+        return $imageObject;
+    }
+
     protected function publishToBluesky(CommentPost $post, string $postUrl, array $config): bool
     {
         if (empty($config['handle']) || empty($config['app_password'])) {
@@ -77,56 +126,28 @@ class PublishStarredPost
             $embedData = null;
             $uploadedImages = [];
             $cleanContent = $post->content ?? '';
-
-            if (preg_match_all('/\!\[(.*?)\]\((.*?)\)/', $post->content ?? '', $matches, PREG_SET_ORDER)) {
+            if (preg_match_all('/(?:!\[(?P<alt_md>.*?)\]\((?P<url_md>.*?)\)|\[upl-image-preview\b[\s\S]*?\burl=(?P<url_upl>https?:\/\/\S+)[\s\S]*?\balt=(?P<alt_upl>[^\s\]]+)[\s\S]*?\])/i', $cleanContent, $matches, PREG_SET_ORDER)) {
                 foreach ($matches as $match) {
                     $cleanContent = str_replace($match[0], '', $cleanContent);
 
                     if (count($uploadedImages) >= 4) break;
 
-                    $altText = !empty($match[1]) ? $match[1] : 'Bifogad bild';
-                    $imageUrl = $match[2];
-                    $imageData = null;
-                    $mimeType = null;
+                    $imageObject = $this->fetchImageObject( $match );
 
-                    if (str_contains($imageUrl, '/assets/')) {
-                        $pathParts = explode('/assets/', $imageUrl);
-                        $localPath = public_path('assets/' . $pathParts[1]);
-
-                        if (file_exists($localPath)) {
-                            $imageData = file_get_contents($localPath);
-                            $mimeType = (new \finfo(FILEINFO_MIME_TYPE))->file($localPath);
-                        }
-                    } elseif (filter_var($imageUrl, FILTER_VALIDATE_URL)) {
-                        $externalData = @file_get_contents($imageUrl);
-                        if ($externalData !== false) {
-                            $imageData = $externalData;
-                            $ext = pathinfo($imageUrl, PATHINFO_EXTENSION);
-                            $mimeType = match(strtolower($ext)) {
-                                'jpg', 'jpeg' => 'image/jpeg',
-                                'png' => 'image/png',
-                                'gif' => 'image/gif',
-                                'webp' => 'image/webp',
-                                default => 'image/jpeg',
-                            };
-                        }
-                    }
-
-                    if ($imageData && $mimeType) {
+                    if ($imageObject) {
                         try {
                             $uploadResponse = $client->post('/xrpc/com.atproto.repo.uploadBlob', [
                                 'headers' => [
                                     'Authorization' => 'Bearer ' . $jwt,
-                                    'Content-Type' => $mimeType
+                                    'Content-Type' => $imageObject->mimeType
                                 ],
-                                'body' => $imageData
+                                'body' => $imageObject->imageData
                             ]);
-
                             $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
                             if (isset($uploadData['blob'])) {
                                 $uploadedImages[] = [
                                     'image' => $uploadData['blob'],
-                                    'alt' => $altText
+                                    'alt' => $imageObject->altText
                                 ];
                             }
                         } catch (\Exception $e) {
@@ -201,52 +222,26 @@ class PublishStarredPost
             $mediaIds = [];
             $cleanContent = $post->content ?? '';
 
-            if (preg_match_all('/\!\[(.*?)\]\((.*?)\)/', $post->content ?? '', $matches, PREG_SET_ORDER)) {
+            if (preg_match_all('/(?:!\[(?P<alt_md>.*?)\]\((?P<url_md>.*?)\)|\[upl-image-preview\b[\s\S]*?\burl=(?P<url_upl>https?:\/\/\S+)[\s\S]*?\balt=(?P<alt_upl>[^\s\]]+)[\s\S]*?\])/i', $cleanContent, $matches, PREG_SET_ORDER)) {
                 foreach ($matches as $match) {
                     $cleanContent = str_replace($match[0], '', $cleanContent);
 
                     if (count($mediaIds) >= 4) break;
 
-                    $altText = !empty($match[1]) ? urldecode($match[1]) : 'Bifogad bild';
-                    $imageUrl = $match[2];
-                    $fileContents = null;
-                    $fileName = 'image.jpg'; // Standardnamn om det behövs
+                    $imageObject = $this->fetchImageObject( $match );
 
-                    if (str_contains($imageUrl, '/assets/')) {
-                        // Lokal filhantering
-                        $pathParts = explode('/assets/', $imageUrl);
-                        if (isset($pathParts[1]) && file_exists($localPath = public_path('assets/' . $pathParts[1]))) {
-                            $fileContents = fopen($localPath, 'r');
-                            $fileName = basename($localPath);
-                        }
-                    } elseif (filter_var($imageUrl, FILTER_VALIDATE_URL)) {
-                        // Extern filhantering (laddar ner bilden)
-                        $options = [
-                            "http" => [
-                                "method" => "GET",
-                                "header" => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
-                            ]
-                        ];
-                        $context = stream_context_create($options);
-                        $externalData = @file_get_contents($imageUrl, false, $context);
-                        if ($externalData !== false) {
-                            $fileContents = $externalData;
-                            $fileName = basename(parse_url($imageUrl, PHP_URL_PATH)) ?: 'image.jpg';
-                        }
-                    }
-
-                    if ($fileContents !== null) {
+                    if ($imageObject->imageData !== null) {
                         try {
                             $uploadResponse = $client->post('/api/v1/media', [
                                 'multipart' => [
                                     [
                                         'name'     => 'file',
-                                        'contents' => $fileContents,
-                                        'filename' => $fileName
+                                        'contents' => $imageObject->imageData,
+                                        'filename' => $imageObject->fileName
                                     ],
                                     [
                                         'name'     => 'description',
-                                        'contents' => $altText
+                                        'contents' => $imageObject->altText
                                     ]
                                 ]
                             ]);
