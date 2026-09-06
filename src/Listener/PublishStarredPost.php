@@ -17,18 +17,23 @@ use Flarum\Post\Event\Saving;
 use Flarum\Post\CommentPost;
 use GuzzleHttp\Client;
 use Psr\Log\LoggerInterface;
+use Illuminate\Contracts\Filesystem\Factory as FilesystemFactory;
 
 class PublishStarredPost
 {
     protected $config;
     protected $logger;
     protected $url;
+    protected $filesystem;
+    protected $assetsDisk;
 
     public function __construct(Config $config, LoggerInterface $logger, UrlGenerator $url)
     {
         $this->config = $config;
         $this->logger = $logger;
         $this->url = $url;
+        $this->filesystem = resolve(FilesystemFactory::class);
+        $this->assetsDisk = $this->filesystem->disk('flarum-assets');
     }
 
     public function handle(Saving $event)
@@ -56,8 +61,7 @@ class PublishStarredPost
         }
     }
 
-    public function fetchImageObject(Array $match): Object {
-        $imageUrl = !empty($match[2]) ? $match[2] : ($match[3] ?? null);
+    public function fetchImageObject(String $imageUrl): Object {
         $imageObject = (Object) [
             'fileName' => null,
             'mimeType' => null,
@@ -105,6 +109,66 @@ class PublishStarredPost
         return $imageObject;
     }
 
+    protected function truncate(String $text, Int $maxTextLength): String
+    {
+        if (mb_strlen($text) > $maxTextLength) {
+            $text = mb_substr($text, 0, $maxTextLength - 3) . '...';
+        }
+        return $text;
+    }
+
+    protected function uploadToMastodon(Object $imageObject, Client $client): String
+    {
+        $uploadedId = null;
+        try {
+            $uploadResponse = $client->post('/api/v1/media', [
+                'multipart' => [
+                    [
+                        'name'     => 'file',
+                        'contents' => $imageObject->imageData,
+                        'filename' => $imageObject->fileName
+                    ],
+                    [
+                        'name'     => 'description',
+                        'contents' => $imageObject->altText
+                    ]
+                ]
+            ]);
+
+            $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
+            if (isset($uploadData['id'])) {
+                $uploadedId = $uploadData['id'];
+            }
+        } catch (\Exception $e) {
+            logger()->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
+        }
+        return $uploadedId;
+    }
+
+    protected function uploadToBluesky(Object $imageObject, Client $client, String $jwt): Array
+    {
+        $uploadedImage = [];
+        try {
+            $uploadResponse = $client->post('/xrpc/com.atproto.repo.uploadBlob', [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $jwt,
+                    'Content-Type' => $imageObject->mimeType
+                ],
+                'body' => $imageObject->imageData
+            ]);
+            $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
+            if (isset($uploadData['blob'])) {
+                $uploadedImage = [
+                    'image' => $uploadData['blob'],
+                    'alt' => $imageObject->altText
+                ];
+            }
+        } catch (\Exception $e) {
+            logger()->error("Kunde inte ladda upp bild till Bluesky: " . $e->getMessage());
+        }
+        return $uploadedImage;
+    }
+
     protected function publishToBluesky(CommentPost $post, string $postUrl, array $config): bool
     {
         if (empty($config['handle']) || empty($config['app_password'])) {
@@ -126,39 +190,33 @@ class PublishStarredPost
             $embedData = null;
             $uploadedImages = [];
             $cleanContent = $post->content ?? '';
+
+            if (!empty($post->discussion->linkposter_thumbnail) && !empty($post->discussion->linkposter_description)) {
+                $imageUrl = $this->assetsDisk->url("linkposter/{$post->discussion->linkposter_thumbnail}");
+                $imageObject = $this->fetchImageObject( $imageUrl );
+                if ($imageObject) {
+                    $uploadedImages[] = $this->uploadToBluesky($imageObject, $client, $jwt);
+                }
+                $cleanContent = "{$post->discussion->title}\n\n{$post->discussion->linkposter_description}";
+            }
+
             if (preg_match_all('/(?:!\[(?P<alt_md>.*?)\]\((?P<url_md>.*?)\)|\[upl-image-preview\b[\s\S]*?\burl=(?P<url_upl>https?:\/\/\S+)[\s\S]*?\balt=(?P<alt_upl>[^\s\]]+)[\s\S]*?\])/i', $cleanContent, $matches, PREG_SET_ORDER)) {
                 foreach ($matches as $match) {
                     $cleanContent = str_replace($match[0], '', $cleanContent);
 
                     if (count($uploadedImages) >= 4) break;
 
-                    $imageObject = $this->fetchImageObject( $match );
+                    $imageUrl = !empty($match[2]) ? $match[2] : ($match[3] ?? null);
+                    $imageObject = $this->fetchImageObject( $imageUrl );
 
                     if ($imageObject) {
-                        try {
-                            $uploadResponse = $client->post('/xrpc/com.atproto.repo.uploadBlob', [
-                                'headers' => [
-                                    'Authorization' => 'Bearer ' . $jwt,
-                                    'Content-Type' => $imageObject->mimeType
-                                ],
-                                'body' => $imageObject->imageData
-                            ]);
-                            $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
-                            if (isset($uploadData['blob'])) {
-                                $uploadedImages[] = [
-                                    'image' => $uploadData['blob'],
-                                    'alt' => $imageObject->altText
-                                ];
-                            }
-                        } catch (\Exception $e) {
-                            logger()->error("Kunde inte ladda upp bild till Bluesky: " . $e->getMessage());
-                        }
+                        $uploadedImages[] = $this->uploadToBluesky($imageObject, $client, $jwt);
                     }
                 }
+            }
 
-                if (!empty($uploadedImages)) {
-                    $embedData = ['$type' => 'app.bsky.embed.images', 'images' => $uploadedImages];
-                }
+            if (!empty($uploadedImages)) {
+                $embedData = ['$type' => 'app.bsky.embed.images', 'images' => $uploadedImages];
             }
 
             $text = strip_tags((string) $cleanContent);
@@ -171,9 +229,7 @@ class PublishStarredPost
             $lineBreak = "\n\n";
             $linkText = "🔗 Läs på forumet";
             $maxTextLength = 280 - mb_strlen($lineBreak . $linkText);
-            if (mb_strlen($text) > $maxTextLength) {
-                $text = mb_substr($text, 0, $maxTextLength - 3) . '...';
-            }
+            $text = $this->truncate($text, $maxTextLength);
 
             $text .= $lineBreak;
             $startByte = strlen($text);
@@ -222,37 +278,26 @@ class PublishStarredPost
             $mediaIds = [];
             $cleanContent = $post->content ?? '';
 
+            if (!empty($post->discussion->linkposter_thumbnail) && !empty($post->discussion->linkposter_description)) {
+                $imageUrl = $this->assetsDisk->url("linkposter/{$post->discussion->linkposter_thumbnail}");
+                $imageObject = $this->fetchImageObject( $imageUrl );
+                if ($imageObject) {
+                    $mediaIds[] = $this->uploadToMastodon($imageObject, $client);
+                }
+                $cleanContent = "{$post->discussion->title}\n\n{$post->discussion->linkposter_description}";
+            }
+
             if (preg_match_all('/(?:!\[(?P<alt_md>.*?)\]\((?P<url_md>.*?)\)|\[upl-image-preview\b[\s\S]*?\burl=(?P<url_upl>https?:\/\/\S+)[\s\S]*?\balt=(?P<alt_upl>[^\s\]]+)[\s\S]*?\])/i', $cleanContent, $matches, PREG_SET_ORDER)) {
                 foreach ($matches as $match) {
                     $cleanContent = str_replace($match[0], '', $cleanContent);
 
                     if (count($mediaIds) >= 4) break;
 
-                    $imageObject = $this->fetchImageObject( $match );
+                    $imageUrl = !empty($match[2]) ? $match[2] : ($match[3] ?? null);
+                    $imageObject = $this->fetchImageObject( $imageUrl );
 
                     if ($imageObject->imageData !== null) {
-                        try {
-                            $uploadResponse = $client->post('/api/v1/media', [
-                                'multipart' => [
-                                    [
-                                        'name'     => 'file',
-                                        'contents' => $imageObject->imageData,
-                                        'filename' => $imageObject->fileName
-                                    ],
-                                    [
-                                        'name'     => 'description',
-                                        'contents' => $imageObject->altText
-                                    ]
-                                ]
-                            ]);
-
-                            $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
-                            if (isset($uploadData['id'])) {
-                                $mediaIds[] = $uploadData['id'];
-                            }
-                        } catch (\Exception $e) {
-                            logger()->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
-                        }
+                        $mediaIds[] = $this->uploadToMastodon($imageObject, $client);
                     }
                 }
             }
@@ -272,9 +317,7 @@ class PublishStarredPost
             $linkText = "\n\n🔗 Läs på forumet:\n" . $postUrl;
 
             $maxTextLength = 500 - strlen($linkText);
-            if (mb_strlen($text) > $maxTextLength) {
-                $text = mb_substr($text, 0, $maxTextLength - 3) . '...';
-            }
+            $text = $this->truncate($text, $maxTextLength);
 
             $statusText = $text . $linkText;
 
