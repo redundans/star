@@ -71,39 +71,34 @@ class PublishStarredPost
 
         $imageObject->altText = 'Bifogad bild';
 
-        if (str_contains($imageUrl, '/assets/')) {
-            $pathParts = explode('/assets/', $imageUrl);
-            $localPath = public_path('assets/' . $pathParts[1]);
-
-            if (file_exists($localPath)) {
-                $imageObject->imageData = file_get_contents($localPath);
-                $imageObject->mimeType = (new \finfo(FILEINFO_MIME_TYPE))->file($localPath);
-                $imageObject->fileName = basename($localPath);
-            }
-        } elseif (filter_var($imageUrl, FILTER_VALIDATE_URL)) {
-            $externalData = @file_get_contents(
-                $imageUrl,
-                false,
-                stream_context_create(
-                    [
-                        "http" => [
-                            "method" => "GET",
-                            "header" => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
+        if (filter_var($imageUrl, FILTER_VALIDATE_URL)) {
+            try {
+                $externalData = @file_get_contents(
+                    $imageUrl,
+                    false,
+                    stream_context_create(
+                        [
+                            "http" => [
+                                "method" => "GET",
+                                "header" => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
+                            ]
                         ]
-                    ]
-                )
-            );
-            if ($externalData !== false) {
-                $imageObject->fileName = basename(parse_url($imageUrl, PHP_URL_PATH)) ?: 'image.jpg';
-                $imageObject->imageData = $externalData;
-                $ext = pathinfo($imageUrl, PATHINFO_EXTENSION);
-                $imageObject->mimeType = match(strtolower($ext)) {
-                    'jpg', 'jpeg' => 'image/jpeg',
-                    'png' => 'image/png',
-                    'gif' => 'image/gif',
-                    'webp' => 'image/webp',
-                    default => 'image/jpeg',
-                };
+                    )
+                );
+                if ($externalData !== false) {
+                    $imageObject->fileName = basename(parse_url($imageUrl, PHP_URL_PATH)) ?: 'image.jpg';
+                    $imageObject->imageData = $externalData;
+                    $ext = pathinfo($imageUrl, PATHINFO_EXTENSION);
+                    $imageObject->mimeType = match(strtolower($ext)) {
+                        'jpg', 'jpeg' => 'image/jpeg',
+                        'png' => 'image/png',
+                        'gif' => 'image/gif',
+                        'webp' => 'image/webp',
+                        default => 'image/jpeg',
+                    };
+                }
+            } catch (\Exception $e) {
+                $this->logger()->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
             }
         }
         return $imageObject;
@@ -140,7 +135,7 @@ class PublishStarredPost
                 $uploadedId = $uploadData['id'];
             }
         } catch (\Exception $e) {
-            logger()->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
+            $this->logger()->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
         }
         return $uploadedId;
     }
@@ -164,7 +159,7 @@ class PublishStarredPost
                 ];
             }
         } catch (\Exception $e) {
-            logger()->error("Kunde inte ladda upp bild till Bluesky: " . $e->getMessage());
+            $this->logger()->error("Kunde inte ladda upp bild till Bluesky: " . $e->getMessage());
         }
         return $uploadedImage;
     }
@@ -191,12 +186,14 @@ class PublishStarredPost
             $uploadedImages = [];
             $cleanContent = $post->content ?? '';
 
-            if (!empty($post->discussion->linkposter_thumbnail) && !empty($post->discussion->linkposter_description)) {
+            if (!empty($post->discussion->linkposter_thumbnail)) {
                 $imageUrl = $this->assetsDisk->url("linkposter/{$post->discussion->linkposter_thumbnail}");
                 $imageObject = $this->fetchImageObject( $imageUrl );
                 if ($imageObject) {
                     $uploadedImages[] = $this->uploadToBluesky($imageObject, $client, $jwt);
                 }
+            }
+            if (!empty($post->discussion->linkposter_description)) {
                 $cleanContent = "{$post->discussion->title}\n\n{$post->discussion->linkposter_description}";
             }
 
@@ -278,12 +275,15 @@ class PublishStarredPost
             $mediaIds = [];
             $cleanContent = $post->content ?? '';
 
-            if (!empty($post->discussion->linkposter_thumbnail) && !empty($post->discussion->linkposter_description)) {
+            if (!empty($post->discussion->linkposter_thumbnail)) {
                 $imageUrl = $this->assetsDisk->url("linkposter/{$post->discussion->linkposter_thumbnail}");
                 $imageObject = $this->fetchImageObject( $imageUrl );
                 if ($imageObject) {
                     $mediaIds[] = $this->uploadToMastodon($imageObject, $client);
                 }
+            }
+
+            if (!empty($post->discussion->linkposter_description)) {
                 $cleanContent = "{$post->discussion->title}\n\n{$post->discussion->linkposter_description}";
             }
 
