@@ -98,7 +98,7 @@ class PublishStarredPost
                     };
                 }
             } catch (\Exception $e) {
-                $this->logger()->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
+                $this->logger->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
             }
         }
         return $imageObject;
@@ -112,7 +112,7 @@ class PublishStarredPost
         return $text;
     }
 
-    protected function uploadToMastodon(Object $imageObject, Client $client): String
+    protected function uploadToMastodon(Object $imageObject, Client $client): ?String
     {
         $uploadedId = null;
         try {
@@ -135,7 +135,7 @@ class PublishStarredPost
                 $uploadedId = $uploadData['id'];
             }
         } catch (\Exception $e) {
-            $this->logger()->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
+            $this->logger->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
         }
         return $uploadedId;
     }
@@ -159,7 +159,7 @@ class PublishStarredPost
                 ];
             }
         } catch (\Exception $e) {
-            $this->logger()->error("Kunde inte ladda upp bild till Bluesky: " . $e->getMessage());
+            $this->logger->error("Kunde inte ladda upp bild till Bluesky: " . $e->getMessage());
         }
         return $uploadedImage;
     }
