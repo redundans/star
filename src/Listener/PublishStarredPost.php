@@ -35,10 +35,6 @@ class PublishStarredPost
     {
         $post = $event->post;
 
-        if (!($post instanceof CommentPost) || !$post->is_starred || $post->is_synced_to_social) {
-            return;
-        }
-
         if (!$post->exists) {
             return;
         }
@@ -68,8 +64,6 @@ class PublishStarredPost
 
         try {
             $client = new Client(['base_uri' => 'https://bsky.social']);
-
-            // 1. Autentisering
             $authResponse = $client->post('/xrpc/com.atproto.server.createSession', [
                 'json' => [
                     'identifier' => $config['handle'],
@@ -80,43 +74,77 @@ class PublishStarredPost
             $jwt = $authData['accessJwt'];
             $did = $authData['did'];
 
-            // 2. Bilder (Max 4)
             $embedData = null;
             $uploadedImages = [];
-            if (preg_match_all('/\[upl-image-preview[^\]]*url=([^\s\]]+)[^\]]*alt=([^\s\]]+)?[^\]]*\]/', $post->content ?? '', $matches, PREG_SET_ORDER)) {
+            $cleanContent = $post->content ?? '';
+
+            if (preg_match_all('/\!\[(.*?)\]\((.*?)\)/', $post->content ?? '', $matches, PREG_SET_ORDER)) {
                 foreach ($matches as $match) {
+                    $cleanContent = str_replace($match[0], '', $cleanContent);
+
                     if (count($uploadedImages) >= 4) break;
-                    $pathParts = explode('/assets/', $match[1]);
-                    if (isset($pathParts[1]) && file_exists($localPath = public_path('assets/' . $pathParts[1]))) {
-                        $uploadResponse = $client->post('/xrpc/com.atproto.repo.uploadBlob', [
-                            'headers' => [
-                                'Authorization' => 'Bearer ' . $jwt,
-                                'Content-Type' => (new \finfo(FILEINFO_MIME_TYPE))->file($localPath)
-                            ],
-                            'body' => file_get_contents($localPath)
-                        ]);
-                        $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
-                        if (isset($uploadData['blob'])) {
-                            $uploadedImages[] = [
-                                'image' => $uploadData['blob'],
-                                'alt' => isset($match[2]) ? urldecode($match[2]) : 'Bifogad bild'
-                            ];
+
+                    $altText = !empty($match[1]) ? $match[1] : 'Bifogad bild';
+                    $imageUrl = $match[2];
+                    $imageData = null;
+                    $mimeType = null;
+
+                    if (str_contains($imageUrl, '/assets/')) {
+                        $pathParts = explode('/assets/', $imageUrl);
+                        $localPath = public_path('assets/' . $pathParts[1]);
+
+                        if (file_exists($localPath)) {
+                            $imageData = file_get_contents($localPath);
+                            $mimeType = (new \finfo(FILEINFO_MIME_TYPE))->file($localPath);
+                        }
+                    } elseif (filter_var($imageUrl, FILTER_VALIDATE_URL)) {
+                        $externalData = @file_get_contents($imageUrl);
+                        if ($externalData !== false) {
+                            $imageData = $externalData;
+                            $ext = pathinfo($imageUrl, PATHINFO_EXTENSION);
+                            $mimeType = match(strtolower($ext)) {
+                                'jpg', 'jpeg' => 'image/jpeg',
+                                'png' => 'image/png',
+                                'gif' => 'image/gif',
+                                'webp' => 'image/webp',
+                                default => 'image/jpeg',
+                            };
+                        }
+                    }
+
+                    if ($imageData && $mimeType) {
+                        try {
+                            $uploadResponse = $client->post('/xrpc/com.atproto.repo.uploadBlob', [
+                                'headers' => [
+                                    'Authorization' => 'Bearer ' . $jwt,
+                                    'Content-Type' => $mimeType
+                                ],
+                                'body' => $imageData
+                            ]);
+
+                            $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
+                            if (isset($uploadData['blob'])) {
+                                $uploadedImages[] = [
+                                    'image' => $uploadData['blob'],
+                                    'alt' => $altText
+                                ];
+                            }
+                        } catch (\Exception $e) {
+                            logger()->error("Kunde inte ladda upp bild till Bluesky: " . $e->getMessage());
                         }
                     }
                 }
+
                 if (!empty($uploadedImages)) {
                     $embedData = ['$type' => 'app.bsky.embed.images', 'images' => $uploadedImages];
                 }
             }
 
-            $rawContent = $post->content ?? '';
-
-            $cleanContent = preg_replace('/\[upl-image-preview[^\]]*\]/', '', $rawContent);
             $text = strip_tags((string) $cleanContent);
             $text = trim($text);
 
             if (empty($text)) {
-                $text = "Nytt stjärnmärkt inlägg!";
+                $text = "Nytt inlägg på Noden Forum!";
             }
 
             $lineBreak = "\n\n";
@@ -171,32 +199,74 @@ class PublishStarredPost
             ]);
 
             $mediaIds = [];
-            if (preg_match_all('/\[upl-image-preview[^\]]*url=([^\s\]]+)[^\]]*alt=([^\s\]]+)?[^\]]*\]/', $post->content ?? '', $matches, PREG_SET_ORDER)) {
+            $cleanContent = $post->content ?? '';
+
+            if (preg_match_all('/\!\[(.*?)\]\((.*?)\)/', $post->content ?? '', $matches, PREG_SET_ORDER)) {
                 foreach ($matches as $match) {
+                    $cleanContent = str_replace($match[0], '', $cleanContent);
+
                     if (count($mediaIds) >= 4) break;
-                    $pathParts = explode('/assets/', $match[1]);
-                    if (isset($pathParts[1]) && file_exists($localPath = public_path('assets/' . $pathParts[1]))) {
-                        $uploadResponse = $client->post('/api/v1/media', [
-                            'multipart' => [
-                                ['name' => 'file', 'contents' => fopen($localPath, 'r')],
-                                ['name' => 'description', 'contents' => isset($match[2]) ? urldecode($match[2]) : 'Bifogad bild']
+
+                    $altText = !empty($match[1]) ? urldecode($match[1]) : 'Bifogad bild';
+                    $imageUrl = $match[2];
+                    $fileContents = null;
+                    $fileName = 'image.jpg'; // Standardnamn om det behövs
+
+                    if (str_contains($imageUrl, '/assets/')) {
+                        // Lokal filhantering
+                        $pathParts = explode('/assets/', $imageUrl);
+                        if (isset($pathParts[1]) && file_exists($localPath = public_path('assets/' . $pathParts[1]))) {
+                            $fileContents = fopen($localPath, 'r');
+                            $fileName = basename($localPath);
+                        }
+                    } elseif (filter_var($imageUrl, FILTER_VALIDATE_URL)) {
+                        // Extern filhantering (laddar ner bilden)
+                        $options = [
+                            "http" => [
+                                "method" => "GET",
+                                "header" => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
                             ]
-                        ]);
-                        $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
-                        if (isset($uploadData['id'])) {
-                            $mediaIds[] = $uploadData['id'];
+                        ];
+                        $context = stream_context_create($options);
+                        $externalData = @file_get_contents($imageUrl, false, $context);
+                        if ($externalData !== false) {
+                            $fileContents = $externalData;
+                            $fileName = basename(parse_url($imageUrl, PHP_URL_PATH)) ?: 'image.jpg';
+                        }
+                    }
+
+                    if ($fileContents !== null) {
+                        try {
+                            $uploadResponse = $client->post('/api/v1/media', [
+                                'multipart' => [
+                                    [
+                                        'name'     => 'file',
+                                        'contents' => $fileContents,
+                                        'filename' => $fileName
+                                    ],
+                                    [
+                                        'name'     => 'description',
+                                        'contents' => $altText
+                                    ]
+                                ]
+                            ]);
+
+                            $uploadData = json_decode($uploadResponse->getBody()->getContents(), true);
+                            if (isset($uploadData['id'])) {
+                                $mediaIds[] = $uploadData['id'];
+                            }
+                        } catch (\Exception $e) {
+                            logger()->error("Kunde inte ladda upp bild till Mastodon: " . $e->getMessage());
                         }
                     }
                 }
             }
 
-            $rawContent = $post->content ?? '';
-            $cleanContent = preg_replace('/\[upl-image-preview[^\]]*\]/', '', $rawContent);
+            $cleanContent = trim($cleanContent);
             $text = strip_tags((string) $cleanContent);
-            $text = trim($text);
 
             if (empty($text)) {
-                $text = "Nytt stjärnmärkt inlägg!";
+                $text = "Nytt inlägg på Noden Forum!";
             }
 
             $postUrl = $this->url->to('forum')->route('discussion', [
