@@ -27,8 +27,8 @@
             "category": "",
             "icon": {
                 "name": "fas fa-star",
-                "color": "",
-                "backgroundColor": ""
+                "color": "#222222",
+                "backgroundColor": "#fab005"
             }
         },
         "flarum-cli": {
